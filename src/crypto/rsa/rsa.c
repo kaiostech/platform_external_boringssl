@@ -65,6 +65,8 @@
 #include <openssl/mem.h>
 #include <openssl/obj.h>
 #include <openssl/thread.h>
+#include <openssl/digest.h>
+#include <openssl/x509.h>
 
 #include "internal.h"
 #include "../internal.h"
@@ -402,6 +404,85 @@ static int pkcs1_prefixed_msg(uint8_t **out_msg, size_t *out_msg_len,
   return 0;
 }
 
+static int encode_pkcs1(unsigned char **out, int *out_len, int type,
+                        const unsigned char *m, unsigned int m_len)
+{
+  X509_SIG sig;
+  X509_ALGOR algor;
+  ASN1_TYPE parameter;
+  ASN1_OCTET_STRING digest;
+  uint8_t *der = NULL;
+  int len;
+
+  sig.algor = &algor;
+  sig.algor->algorithm = OBJ_nid2obj(type);
+  if (sig.algor->algorithm == NULL) {
+    return 0;
+  }
+  if (OBJ_length(sig.algor->algorithm) == 0) {
+    return 0;
+  }
+  parameter.type = V_ASN1_NULL;
+  parameter.value.ptr = NULL;
+  sig.algor->parameter = &parameter;
+
+  sig.digest = &digest;
+  sig.digest->data = (unsigned char *)m;
+  sig.digest->length = m_len;
+
+  len = i2d_X509_SIG(&sig, &der);
+  if (len < 0)
+    return 0;
+
+  *out = der;
+  *out_len = len;
+  return 1;
+}
+
+int RSA_sign_dongle(int type, const unsigned char *m, unsigned int m_len,
+	             unsigned char *sigret, unsigned int *siglen, RSA *rsa)
+{
+  int encrypt_len, encoded_len = 0, ret = 0;
+  unsigned char *tmps = NULL;
+  const unsigned char *encoded = NULL;
+  if (rsa->meth->sign) {
+    return rsa->meth->sign(type, m, m_len, sigret, siglen, rsa);
+  }
+
+  /* Compute the encoded digest. */
+  if (type == NID_md5_sha1) {
+    /*
+     * NID_md5_sha1 corresponds to the MD5/SHA1 combination in TLS 1.1 and
+     * earlier. It has no DigestInfo wrapper but otherwise is
+     * RSASSA-PKCS1-v1_5.
+     */
+    if (m_len != SSL_SIG_LENGTH) {
+      return 0;
+    }
+    encoded_len = SSL_SIG_LENGTH;
+    encoded = m;
+  } else {
+    if (!encode_pkcs1(&tmps, &encoded_len, type, m, m_len))
+      goto err;
+    encoded = tmps;
+  }
+
+  if (encoded_len > RSA_size(rsa) - RSA_PKCS1_PADDING_SIZE) {
+    goto err;
+  }
+  encrypt_len = RSA_private_encrypt(encoded_len, encoded, sigret, rsa,
+                                    RSA_PKCS1_PADDING);
+  if (encrypt_len <= 0)
+    goto err;
+
+  *siglen = encrypt_len;
+  ret = 1;
+
+err:
+  OPENSSL_clear_free(tmps, (size_t)encoded_len);
+  return ret;
+}
+
 int RSA_sign(int hash_nid, const uint8_t *in, unsigned in_len, uint8_t *out,
              unsigned *out_len, RSA *rsa) {
   const unsigned rsa_size = RSA_size(rsa);
@@ -436,6 +517,120 @@ finish:
   if (signed_msg_is_alloced) {
     OPENSSL_free(signed_msg);
   }
+  return ret;
+}
+
+int RSA_verify_dongle(int type, const unsigned char *m, unsigned int m_len,
+	               const unsigned char *sigbuf, unsigned int siglen, RSA *rsa)
+{
+  if (rsa->meth->verify) {
+    return rsa->meth->verify(type, m, m_len, sigbuf, siglen, rsa);
+  }
+  return int_rsa_verify(type, m, m_len, NULL, NULL, sigbuf, siglen, rsa);
+}
+
+int int_rsa_verify(int type, const unsigned char *m, unsigned int m_len,
+                   unsigned char *rm, size_t *prm_len,
+                   const unsigned char *sigbuf, size_t siglen, RSA *rsa)
+{
+  int decrypt_len, ret = 0, encoded_len = 0;
+  unsigned char *decrypt_buf = NULL, *encoded = NULL;
+
+  if (siglen != (size_t)RSA_size(rsa)) {
+    return 0;
+  }
+
+  /* Recover the encoded digest. */
+  decrypt_buf = OPENSSL_malloc(siglen);
+  if (decrypt_buf == NULL) {
+    goto err;
+  }
+
+  decrypt_len = RSA_public_decrypt((int)siglen, sigbuf, decrypt_buf, rsa,
+                                   RSA_PKCS1_PADDING);
+  if (decrypt_len <= 0)
+    goto err;
+
+  if (type == NID_md5_sha1) {
+    /*
+     * NID_md5_sha1 corresponds to the MD5/SHA1 combination in TLS 1.1 and
+     * earlier. It has no DigestInfo wrapper but otherwise is
+     * RSASSA-PKCS1-v1_5.
+     */
+    if (decrypt_len != SSL_SIG_LENGTH) {
+      goto err;
+    }
+
+    if (rm != NULL) {
+      memcpy(rm, decrypt_buf, SSL_SIG_LENGTH);
+      *prm_len = SSL_SIG_LENGTH;
+    } else {
+      if (m_len != SSL_SIG_LENGTH) {
+        goto err;
+      }
+
+      if (memcmp(decrypt_buf, m, SSL_SIG_LENGTH) != 0) {
+        goto err;
+      }
+    }
+  } else if (type == NID_mdc2 && decrypt_len == 2 + 16
+         && decrypt_buf[0] == 0x04 && decrypt_buf[1] == 0x10) {
+    /*
+     * Oddball MDC2 case: signature can be OCTET STRING. check for correct
+     * tag and length octets.
+     */
+    if (rm != NULL) {
+      memcpy(rm, decrypt_buf + 2, 16);
+      *prm_len = 16;
+    } else {
+      if (m_len != 16) {
+        goto err;
+      }
+
+      if (memcmp(m, decrypt_buf + 2, 16) != 0) {
+        goto err;
+      }
+    }
+  } else {
+    /*
+     * If recovering the digest, extract a digest-sized output from the end
+     * of |decrypt_buf| for |encode_pkcs1|, then compare the decryption
+     * output as in a standard verification.
+     */
+    if (rm != NULL) {
+      const EVP_MD *md = EVP_get_digestbynid(type);
+      if (md == NULL) {
+        goto err;
+      }
+
+      m_len = EVP_MD_size(md);
+      if (m_len > (size_t)decrypt_len) {
+        goto err;
+      }
+      m = decrypt_buf + decrypt_len - m_len;
+    }
+
+    /* Construct the encoded digest and ensure it matches. */
+    if (!encode_pkcs1(&encoded, &encoded_len, type, m, m_len))
+      goto err;
+
+    if (encoded_len != decrypt_len
+      || memcmp(encoded, decrypt_buf, encoded_len) != 0) {
+      goto err;
+    }
+
+    /* Output the recovered digest. */
+    if (rm != NULL) {
+      memcpy(rm, m, m_len);
+      *prm_len = m_len;
+    }
+  }
+
+  ret = 1;
+
+err:
+  OPENSSL_clear_free(encoded, (size_t)encoded_len);
+  OPENSSL_clear_free(decrypt_buf, siglen);
   return ret;
 }
 

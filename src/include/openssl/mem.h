@@ -83,6 +83,8 @@ extern "C" {
  * to be given the size of the buffer pointed to by |ptr|. */
 void *OPENSSL_realloc_clean(void *ptr, size_t old_size, size_t new_size);
 
+void OPENSSL_clear_free(void *ptr, size_t num);
+
 /* OPENSSL_cleanse zeros out |len| bytes of memory at |ptr|. This is similar to
  * |memset_s| from C11. */
 OPENSSL_EXPORT void OPENSSL_cleanse(void *ptr, size_t len);
