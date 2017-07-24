@@ -190,6 +190,9 @@ OPENSSL_EXPORT int RSA_sign(int hash_nid, const uint8_t *in,
                             unsigned int in_len, uint8_t *out,
                             unsigned int *out_len, RSA *rsa);
 
+OPENSSL_EXPORT int RSA_sign_dongle(int type, const unsigned char *m, unsigned int m_len,
+                     unsigned char *sigret, unsigned int *siglen, RSA *rsa);
+
 /* RSA_sign_raw signs |in_len| bytes from |in| with the public key from |rsa|
  * and writes, at most, |max_out| bytes of signature data to |out|. The
  * |max_out| argument must be, at least, |RSA_size| in order to ensure success.
@@ -215,6 +218,8 @@ OPENSSL_EXPORT int RSA_sign_raw(RSA *rsa, size_t *out_len, uint8_t *out,
  * returned -1 on error. */
 OPENSSL_EXPORT int RSA_verify(int hash_nid, const uint8_t *msg, size_t msg_len,
                               const uint8_t *sig, size_t sig_len, RSA *rsa);
+OPENSSL_EXPORT int RSA_verify_dongle(int type, const unsigned char *m, unsigned int m_len,
+                       const unsigned char *sigbuf, unsigned int siglen, RSA *rsa);
 
 /* RSA_verify_raw verifies |in_len| bytes of signature from |in| using the
  * public key from |rsa| and writes, at most, |max_out| bytes of plaintext to
