@@ -197,3 +197,12 @@ int BIO_snprintf(char *buf, size_t n, const char *format, ...) {
 int BIO_vsnprintf(char *buf, size_t n, const char *format, va_list args) {
   return vsnprintf(buf, n, format, args);
 }
+
+void OPENSSL_clear_free(void *str, size_t num)
+{
+  if (str == NULL)
+    return;
+  if (num)
+    OPENSSL_cleanse(str, num);
+  OPENSSL_free(str);
+}

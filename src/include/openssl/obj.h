@@ -162,6 +162,7 @@ OPENSSL_EXPORT int OBJ_obj2txt(char *out, int out_len, const ASN1_OBJECT *obj,
 OPENSSL_EXPORT int OBJ_create(const char *oid, const char *short_name,
                               const char *long_name);
 
+size_t OBJ_length(const ASN1_OBJECT *obj);
 
 /* Handling signature algorithm identifiers.
  *

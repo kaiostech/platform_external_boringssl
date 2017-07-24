@@ -662,3 +662,10 @@ err:
 
   return ret;
 }
+
+size_t OBJ_length(const ASN1_OBJECT *obj)
+{
+  if (obj == NULL)
+    return 0;
+  return obj->length;
+}
